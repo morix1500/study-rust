@@ -1,4 +1,7 @@
+use std::error::Error as StdError;
+use std::fmt;
 use std::io;
+use std::str::FromStr;
 
 fn prompt(s: &str) -> io::Result<()> {
     use std::io::{stdout, Write};
@@ -17,6 +20,12 @@ impl Loc {
     fn merge(&self, other: &Loc) -> Loc {
         use std::cmp::{max, min};
         Loc(min(self.0, other.0), max(self.1, other.1))
+    }
+}
+
+impl fmt::Display for Loc {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}-{}", self.0, self.1)
     }
 }
 
@@ -49,6 +58,21 @@ enum TokenKind {
     LParen,
     /// )
     RParen,
+}
+
+impl fmt::Display for TokenKind {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use self::TokenKind::*;
+        match self {
+            Number(n) => n.fmt(f),
+            Plus => write!(f, "+"),
+            Minus => write!(f, "-"),
+            Asterisk => write!(f, "*"),
+            Slash => write!(f, "/"),
+            LParen => write!(f, "("),
+            RParen => write!(f, ")"),
+        }
+    }
 }
 
 type Token = Annnot<TokenKind>;
@@ -91,6 +115,19 @@ impl LexError {
     }
     fn eof(loc: Loc) -> Self {
         LexError::new(LexErrorKind::Eof, loc)
+    }
+}
+
+impl StdError for LexError {}
+
+impl fmt::Display for LexError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use self::LexErrorKind::*;
+        let loc = &self.loc;
+        match self.value {
+            InvalidChar(c) => write!(f, "{}: invalid char '{}'", loc, c),
+            Eof => write!(f, "End of file"),
+        }
     }
 }
 
@@ -193,6 +230,65 @@ fn consume_byte(input: &[u8], pos: usize, b: u8) -> Result<(u8, usize), LexError
     Ok((b, pos + 1))
 }
 
+// エラー型
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Error {
+    Lexer(LexError),
+    Parser(ParseError),
+}
+
+impl Error {
+    fn show_diagnostic(&self, input: &str) {
+        use self::Error::*;
+        use self::ParseError as P;
+
+        let (e, loc): (&StdError, Loc) = match self {
+            Lexer(e) => (e, e.loc.clone()),
+            Parser(e) => {
+                let loc = match e {
+                    P::UnexpectedToken(Token { loc, .. })
+                    | P::NotExpression(Token { loc, .. })
+                    | P::NotOperator(Token { loc, .. })
+                    | P::UnclosedOpenParen(Token { loc, .. }) => loc.clone(),
+                    P::RedundantExpression(Token { loc, .. }) => Loc(loc.0, input.len()),
+                    P::Eof => Loc(input.len(), input.len() + 1),
+                };
+                (e, loc)
+            }
+        };
+        eprintln!("{}", e);
+        print_annot(input, loc);
+    }
+}
+
+impl From<LexError> for Error {
+    fn from(e: LexError) -> Self {
+        Error::Lexer(e)
+    }
+}
+
+impl From<ParseError> for Error {
+    fn from(e: ParseError) -> Self {
+        Error::Parser(e)
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "parser error")
+    }
+}
+
+impl StdError for Error {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        use self::Error::*;
+        match self {
+            Lexer(lex) => Some(lex),
+            Parser(parse) => Some(parse),
+        }
+    }
+}
+
 // ASTを表すデータ型
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum AstKind {
@@ -224,6 +320,15 @@ impl Ast {
             },
             loc,
         )
+    }
+}
+
+impl FromStr for Ast {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let tokens = lex(s)?;
+        let ast = parse(tokens)?;
+        Ok(ast)
     }
 }
 
@@ -284,6 +389,30 @@ enum ParseError {
     /// パース途中で入力がおわった
     Eof,
 }
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use self::ParseError::*;
+        match self {
+            UnexpectedToken(tok) => write!(f, "{}: {} is not expected", tok.loc, tok.value),
+            NotExpression(tok) => write!(
+                f,
+                "{}: '{}' is not a start of expression",
+                tok.loc, tok.value
+            ),
+            NotOperator(tok) => write!(f, "{}: '{}' is not an operator", tok.loc, tok.value),
+            UnclosedOpenParen(tok) => write!(f, "{}: '{}' is not close", tok.loc, tok.value),
+            RedundantExpression(tok) => write!(
+                f,
+                "{}: expression after '{}' is redudant",
+                tok.loc, tok.value
+            ),
+            Eof => write!(f, "End of file"),
+        }
+    }
+}
+
+impl StdError for ParseError {}
 
 fn parse(tokens: Vec<Token>) -> Result<Ast, ParseError> {
     let mut tokens = tokens.into_iter().peekable();
@@ -434,6 +563,20 @@ where
         })
 }
 
+fn print_annot(input: &str, loc: Loc) {
+    eprintln!("{}", input);
+    eprintln!("{}{}", " ".repeat(loc.0), "^".repeat(loc.1 - loc.0));
+}
+
+fn show_trace<E: StdError>(e: E) {
+    eprintln!("{}", e);
+    let mut source = e.source();
+    while let Some(e) = source {
+        eprintln!("caused by {}", e);
+        source = e.source()
+    }
+}
+
 fn main() {
     use std::io::{stdin, BufRead, BufReader};
 
@@ -445,8 +588,14 @@ fn main() {
     loop {
         prompt("> ").unwrap();
         if let Some(Ok(line)) = lines.next() {
-            let tokens = lex(&line).unwrap();
-            let ast = parse(tokens).unwrap();
+            let ast = match line.parse::<Ast>() {
+                Ok(ast) => ast,
+                Err(e) => {
+                    e.show_diagnostic(&line);
+                    show_trace(e);
+                    continue;
+                }
+            };
             println!("{:#?}", ast);
         } else {
             break;

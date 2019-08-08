@@ -25,15 +25,30 @@ impl Default for CountOption {
 }
 
 /// inputから1行ずつUTF-8文字列を読み込み、頻度を数える
-/// 
+///
 /// 頻度を数える対象はオプションによって制御される
 /// * [`CountOption::Char`](enum.CountOption.html#variant.Char): Unicodeの1文字ごと
 /// * [`CountOption::Word`](enum.CountOption.html#variant.Word): 正規表現 \w+ にマッチする単語ごと
 /// * [`CountOption::Line`](enum.CountOption.html#variant.Line): \n または \r\n で区切られた1行ごと
-/// 
+///
 /// # Panics
-/// 
-/// 入力がUTF-8でフォーマットされていない場合にパニックする 
+///
+/// 入力がUTF-8でフォーマットされていない場合にパニックする
+///
+/// # Examples
+/// 入力中の単語の出現頻度を数える例
+///
+/// ```
+/// use std::io::Cursor;
+/// use wordcount::{count, CountOption};
+///
+/// let mut input = Cursor::new("aa bb cc bb");
+/// let freq = count(input, CountOption::Word);
+///
+/// assert_eq!(freq["aa"], 1);
+/// assert_eq!(freq["bb"], 2);
+/// assert_eq!(freq["cc"], 1);
+/// ```
 pub fn count(input: impl BufRead, option: CountOption) -> HashMap<String, usize> {
     let re = Regex::new(r"\w+").unwrap();
     let mut freqs = HashMap::new();
